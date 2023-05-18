@@ -1,0 +1,178 @@
+service: node-aws-lambda-crud
+frameworkVersion: "3"
+
+provider:
+    name: aws
+    runtime: nodejs12.x
+    lambdaHashingVersion: "20201221"
+    region: ap-south-1
+    iamRoleStatements:
+        - Effect: Allow
+          Action:
+              - dynamodb:*
+          Resource:
+              - arn:aws:dynamodb:ap-south-1:800331105397:table/productTable
+        - Effect: Allow
+          Action:
+              - states:StartExecution
+          Resource:
+              - arn:aws:states:ap-south-1:800331105397:stateMachine:addProductStep
+        - Effect: Allow
+          Action:
+              - sqs:*
+          Resource:
+              - arn:aws:sqs:ap-south-1:800331105397:emailSQS
+
+stepFunctions:
+    validate: true
+    stateMachines:
+        createEmailNotification:
+            name: addProductStep
+            definition:
+                Comment: Send Email Notification using State Machine Using SNS
+                StartAt: Processdata
+                States:
+                    Processdata:
+                        Type: Pass
+                        Next: SQSSendMessage
+                    SQSSendMessage:
+                        Type: Pass
+                        Parameters:
+                          MessageBody:
+                              brand.$: $.data.brand
+                              product_name.$: $.data.product_name
+                              quantity.$: $.data.quantity
+                              price.$: $.data.price
+                              flag.$: $.data.flag
+                              _message.$: $.message
+                          QueueUrl: https://sqs.ap-south-1.amazonaws.com/800331105397/emailSQS
+                        Next: BroadcastToSns
+                    BroadcastToSns:
+                        Type: Task
+                        Resource: "arn:aws:states:::sns:publish"
+                        Parameters:
+                            TopicArn: "arn:aws:sns:ap-south-1:800331105397:emailSNS"
+                            Message:
+                              Product added successfully:
+                                brand.$: $.MessageBody.brand
+                                product_name.$: $.MessageBody.product_name
+                                quantity.$: $.MessageBody.quantity
+                                price.$: $.MessageBody.price
+                                flag.$: $.MessageBody.flag
+
+                        End: true
+
+functions:
+    createProduct:
+        handler: src/addProduct.addProduct
+        events:
+            - httpApi:
+                  path: /addproduct
+                  method: POST
+    getAllProducts:
+        handler: src/getAllProducts.getAllProducts
+        events:
+            - httpApi:
+                  path: /getproducts
+                  method: get
+    getProduct:
+        handler: src/getProduct.getProduct
+        events:
+            - httpApi:
+                  path: /getproduct/{id}
+                  method: get
+    updateProduct:
+        handler: src/updateProduct.updateProduct
+        events:
+            - httpApi:
+                  path: /updateproduct/{id}
+                  method: put
+    updateProductsInPromise:
+        handler: src/updateProduct_promise.update
+        events:
+            - httpApi:
+                  path: /updateproductspromise/{id}
+                  method: put
+    deleteProduct:
+        handler: src/deleteProduct.deleteProduct
+        events:
+            - httpApi:
+                  path: /deleteproduct/{id}
+                  method: delete
+
+plugins:
+    - serverless-plugin-typescript
+    - serverless-plugin-common-excludes
+    - serverless-step-functions
+
+resources:
+    Resources:
+        productTable:
+            Type: AWS::DynamoDB::Table
+            Properties:
+                TableName: productTable
+                BillingMode: PAY_PER_REQUEST
+                AttributeDefinitions:
+                    - AttributeName: id
+                      AttributeType: S
+                KeySchema:
+                    - AttributeName: id
+                      KeyType: HASH
+            
+        emailSNS:
+            Type: AWS::SNS::Topic
+            Properties:
+                TopicName: emailSNS
+                FifoTopic: false
+                Subscription:
+                    - Endpoint: anand.p@aveoninfotech.com
+                      Protocol: Email
+
+        emailSNSPolicy:
+            Type: AWS::SNS::TopicPolicy
+            Properties:
+                PolicyDocument:
+                    Version: "2012-10-17"
+                    Statement:
+                        - Sid: emailSNSPolicy
+                          Effect: Allow
+                          Action: sns:Publish
+                          Resource: !Join
+                              - ":"
+                              - - arn
+                                - aws
+                                - sns
+                                - Ref: AWS::Region
+                                - Ref: AWS::AccountId
+                                - emailSNS
+                          Principal:
+                              Service: s3.amazonaws.com
+                Topics:
+                    - !Ref emailSNS
+        emailSQS:
+            Type: AWS::SQS::Queue
+            Properties:
+                QueueName: emailSQS
+                SqsManagedSseEnabled: true
+                VisibilityTimeout: 10
+                MessageRetentionPeriod: 300
+        emailSQSPolicy:
+            Type: AWS::SQS::QueuePolicy
+            Properties:
+                PolicyDocument:
+                    Version: "2012-10-17"
+                    Statement:
+                        - Effect: Allow
+                          Sid: queuePolicy
+                          Action: sqs:SendMessage
+                          Resource:
+                              Fn::GetAtt:
+                                  - emailSQS
+                                  - Arn
+                          Principal:
+                              Service: sns.amazonaws.com
+                          Condition:
+                              ArnEquals:
+                                  "aws:SourceArn": !Ref emailSNS
+                Queues:
+                    - !Ref emailSQS
